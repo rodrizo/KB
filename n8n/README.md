@@ -22,12 +22,11 @@ Automatizaciones post-aprobación para el proyecto **Meeting to Tickets PM** (Cu
 ## Arquitectura
 
 ```
-Backend FastAPI  ──POST webhook──►  WF1 Aprobación
+Backend FastAPI  ──POST webhook──►  WF1 Notificar asignaciones aprobadas
                                         │
-                                        ├─► Email a cada asignado
-                                        ├─► Email alerta riesgo alto al manager
-                                        ├─► Email resumen al jefe
-                                        └─► Log en notifications + PATCH approvals
+                                        ├─► Consulta Supabase: requirement, tickets ya asignados, members, skills
+                                        ├─► Email de asignación a cada developer
+                                        └─► Email al jefe de IT + log notifications
 
 Cron diario 8am  ──────────────────►  WF2 Deadlines vencidas
                                         ├─► Email agrupado por developer
@@ -44,7 +43,7 @@ Cron lunes 7am   ──────────────────►  WF4 
                                         └─► Log en notifications
 ```
 
-Todos los workflows acceden a Supabase vía **HTTP Request** (PostgREST REST API) usando la `service_role` key. Ningún workflow conoce las claves de OpenAI ni de ElevenLabs — esa responsabilidad es del backend.
+Todos los workflows acceden a Supabase vía **HTTP Request** (PostgREST REST API) usando la `service_role` key. OpenAI y ElevenLabs viven en el backend; n8n no decide asignaciones, solo automatiza notificaciones y seguimiento.
 
 ---
 
@@ -114,18 +113,20 @@ Ve a **Settings → Variables** y creá las siguientes:
 
 **Archivo:** `01-aprobacion.json`  
 **Trigger:** Webhook POST en `/webhook/plan-aprobado`  
-**Propósito:** Notificar a cada asignado cuando el manager aprueba un plan de tickets.
+**Propósito:** Después de que el backend ya ejecutó el Assignment Agent y guardó las asignaciones, consultar Supabase y notificar a los developers y al jefe de IT.
 
 ### Flujo
 
 ```
-Webhook → Expandir Tickets (Code) → Filtrar Sin Email
-       → Email a Asignado → Log Notifications → Riesgo Alto? (IF)
-                IF true  → Email Alerta Riesgo Manager ──┐
-                IF false → No Op ─────────────────────────┤
-                                                     Unir Ramas → Aggregate
-                                                     → Construir HTML → Email Resumen Jefe
-                                                     → PATCH approvals (n8n_ok=true)
+Webhook
+  → Normalizar payload del backend
+  → Consultar requirement + proyecto + reunión
+  → Consultar tickets ya asignados por backend
+  → Consultar managers
+  → Email al developer asignado
+  → Log notifications
+  → Email resumen/razonamiento al jefe de IT
+  → Log notifications
 ```
 
 ### URL del webhook
@@ -140,46 +141,52 @@ Configurá esta URL en tu backend FastAPI como destino del POST al aprobar un `r
 
 ### Payload esperado del backend
 
+El backend llama este webhook desde `POST /api/approve/{requirement_id}` después de que `/api/agents/assignment` ya actualizó los tickets. El payload actual del backend es:
+
 ```json
 {
-  "approval_id": "uuid-de-la-aprobacion",
-  "requirement_id": "uuid-del-requirement",
-  "requirement_title": "Módulo de pagos con Stripe",
-  "project_name": "E-Commerce v2",
-  "approved_by": "Ana García",
-  "manager_email": "manager@tuempresa.com",
+  "requirement": {
+    "id": "uuid-del-requirement",
+    "project_id": "uuid-del-project",
+    "meeting_id": "uuid-del-meeting",
+    "status": "approved"
+  },
   "tickets": [
     {
-      "ticket_id": "uuid-ticket-1",
-      "title": "Implementar webhook de Stripe",
-      "priority": "high",
-      "estimate_hours": 16,
-      "risk_pct": 75,
-      "reasoning": "El developer tiene poca experiencia con webhooks de pago y el deadline es ajustado.",
-      "required_skill": "Backend",
-      "skill_label": "Backend",
-      "deadline": "2026-07-15",
-      "assignee_id": "uuid-member-1",
-      "assignee_name": "Carlos López",
-      "assignee_email": "carlos@tuempresa.com"
-    },
-    {
-      "ticket_id": "uuid-ticket-2",
-      "title": "UI de checkout",
-      "priority": "medium",
-      "estimate_hours": 8,
-      "risk_pct": 30,
-      "reasoning": "Tarea estándar de frontend, bien definida.",
-      "required_skill": "Frontend",
-      "skill_label": "Frontend",
-      "deadline": "2026-07-12",
-      "assignee_id": "uuid-member-2",
-      "assignee_name": "María Torres",
-      "assignee_email": "maria@tuempresa.com"
+      "id": "uuid-ticket",
+      "assignee_id": "uuid-member",
+      "risk_pct": 65,
+      "status": "todo"
     }
   ]
 }
 ```
+
+También acepta este payload explícito si luego se decide enviar más metadata desde backend:
+
+```json
+{
+  "approval_id": "uuid-de-la-aprobacion",
+  "requirement_id": "uuid-del-requirement",
+  "approved_by_id": "uuid-del-jefe",
+  "approved_by": "Ana Garcia",
+  "manager_email": "manager@tuempresa.com"
+}
+```
+
+### Tablas que WF1 consulta
+
+- `requirements` con joins a `projects` y `meetings`
+- `tickets` del requirement aprobado con `assignee_id`, `risk_pct`, `assignment_reasoning`
+- `members` del asignado para obtener `name`, `email`, `role`, `current_load`
+- `skills` para mostrar el skill requerido del ticket
+- `ticket_assignments` para recuperar el reasoning persistido por el backend
+
+### Tablas que WF1 escribe
+
+- `notifications`: registra emails enviados a developers y jefe de IT
+
+> La escritura de `tickets`, `ticket_assignments` y `ticket_status_events` ocurre en el backend durante `/api/agents/assignment`, no en n8n.
 
 ---
 
@@ -252,50 +259,31 @@ GET /rest/v1/ticket_status_events
 
 ### WF1 — Simular aprobación (reemplazar URL por la de tu instancia)
 
+Usá un `requirement_id` real que ya tenga tickets creados y asignados por `/api/agents/assignment`. Si usás IDs inventados, WF1 responderá al webhook pero fallará al consultar Supabase porque no encontrará asignaciones.
+
 ```bash
 curl -X POST https://tu-instancia.n8n.cloud/webhook/plan-aprobado \
   -H "Content-Type: application/json" \
   -d '{
-    "approval_id": "test-approval-001",
-    "requirement_id": "test-req-001",
-    "requirement_title": "Test de integración n8n",
-    "project_name": "KB Buildathon",
+    "approval_id": "00000000-0000-0000-0000-000000000001",
+    "requirement_id": "REEMPLAZA_CON_REQUIREMENT_UUID_REAL",
+    "approved_by_id": "REEMPLAZA_CON_MEMBER_UUID_DEL_JEFE",
     "approved_by": "Manager Test",
-    "manager_email": "manager@test.com",
-    "tickets": [
-      {
-        "ticket_id": "test-ticket-001",
-        "title": "Ticket de prueba A",
-        "priority": "high",
-        "estimate_hours": 12,
-        "risk_pct": 80,
-        "reasoning": "Ticket de prueba con riesgo alto para verificar alerta.",
-        "skill_label": "Backend",
-        "deadline": "2026-07-10",
-        "assignee_id": "test-member-001",
-        "assignee_name": "Developer Test",
-        "assignee_email": "dev@test.com"
-      },
-      {
-        "ticket_id": "test-ticket-002",
-        "title": "Ticket de prueba B",
-        "priority": "low",
-        "estimate_hours": 4,
-        "risk_pct": 25,
-        "reasoning": "Ticket sencillo para verificar flujo normal.",
-        "skill_label": "Frontend",
-        "deadline": "2026-07-14",
-        "assignee_id": "test-member-002",
-        "assignee_name": "Frontend Test",
-        "assignee_email": "frontend@test.com"
-      }
-    ]
+    "manager_email": "manager@test.com"
   }'
 ```
 
 Respuesta esperada:
 ```json
-{"received": true, "message": "Procesando notificaciones..."}
+{"received": true, "message": "Aprobacion recibida. Se notificaran las asignaciones ya generadas por el backend."}
+```
+
+Después de ejecutarlo, validar:
+
+```bash
+curl "https://tu-proyecto.supabase.co/rest/v1/notifications?template=eq.ticket_assigned_after_backend_agent&select=id,ticket_id,member_id,status,sent_at,metadata&order=sent_at.desc" \
+  -H "apikey: TU_SERVICE_KEY" \
+  -H "Authorization: Bearer TU_SERVICE_KEY"
 ```
 
 ### WF2 y WF3 — Ejecutar manualmente desde n8n
@@ -329,7 +317,7 @@ CREATE TABLE notifications (
   ticket_id   uuid REFERENCES tickets(id),
   member_id   uuid REFERENCES members(id),
   channel     text NOT NULL DEFAULT 'email',
-  template    text,               -- 'ticket_assigned' | 'deadline_overdue' | 'stalled_ticket' | 'weekly_digest'
+  template    text,               -- 'ticket_assigned_after_backend_agent' | 'manager_assignment_summary_after_backend_agent' | 'deadline_overdue' | 'stalled_ticket' | 'weekly_digest'
   status      text NOT NULL,      -- 'sent' | 'failed'
   sent_at     timestamptz,
   error_message text,

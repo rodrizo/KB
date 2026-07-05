@@ -1,38 +1,127 @@
 {
-  "name": "WF1 — Aprobación de Plan",
+  "name": "WF1 — Notificar Asignaciones Aprobadas",
   "nodes": [
     {
       "parameters": {
         "httpMethod": "POST",
         "path": "plan-aprobado",
         "responseMode": "onReceived",
-        "responseData": "{\"received\":true,\"message\":\"Procesando notificaciones...\"}",
+        "responseData": "{\"received\":true,\"message\":\"Aprobacion recibida. Se notificaran las asignaciones ya generadas por el backend.\"}",
         "options": {}
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000001",
-      "name": "Plan Aprobado Webhook",
+      "id": "wf1-notify-001",
+      "name": "Webhook Backend Approval",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [240, 300],
-      "webhookId": "plan-aprobado-webhook-id"
+      "position": [200, 300],
+      "webhookId": "plan-aprobado-backend-assigned"
     },
     {
       "parameters": {
-        "jsCode": "// Extrae cada ticket del payload y le adjunta el contexto de la aprobación.\n// Input esperado del backend:\n// { approval_id, requirement_id, requirement_title, project_name,\n//   approved_by, manager_email, tickets: [{...}] }\nconst body = $input.first().json;\nconst base = {\n  approval_id: body.approval_id,\n  requirement_id: body.requirement_id,\n  requirement_title: body.requirement_title || 'Sin título',\n  project_name: body.project_name || 'Sin proyecto',\n  approved_by: body.approved_by || 'Manager',\n  manager_email: body.manager_email || ''\n};\n\nif (!Array.isArray(body.tickets) || body.tickets.length === 0) {\n  throw new Error('El payload no contiene tickets.');\n}\n\nreturn body.tickets.map(ticket => ({\n  json: { ...base, ...ticket }\n}));"
+        "jsCode": "const body = $input.first().json;\nconst requirementId = body.requirement_id || body.requirement?.id || body.requirement?.requirement_id;\nif (!requirementId) throw new Error('Falta requirement_id. El backend debe enviar { requirement: { id } } o { requirement_id }.');\nreturn [{ json: {\n  requirement_id: requirementId,\n  approval_id: body.approval_id || null,\n  approved_by_id: body.approved_by_id || body.requirement?.approved_by_id || null,\n  approved_by: body.approved_by || 'Jefe de IT',\n  manager_email: body.manager_email || $env.MANAGER_EMAIL || '',\n  backend_payload: body\n}}];"
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000002",
-      "name": "Expandir Tickets",
+      "id": "wf1-notify-002",
+      "name": "Normalizar Payload Backend",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [460, 300]
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/requirements",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "id", "value": "=eq.{{ $json.requirement_id }}" },
+            { "name": "select", "value": "id,title,summary,status,approved_at,approved_by_id,project_id,meeting_id,projects(id,name,team_id,owner_id,business_area,status,target_date),meetings(id,title,recorded_at,status)" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "wf1-notify-003",
+      "name": "Consultar Requirement",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/tickets",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "requirement_id", "value": "=eq.{{ $('Normalizar Payload Backend').first().json.requirement_id }}" },
+            { "name": "select", "value": "id,requirement_id,project_id,title,description,priority,estimate_hours,required_skill_id,risk_pct,assignee_id,assignment_reasoning,status,deadline,kanban_order,members:assignee_id(id,name,email,role,current_load,is_manager),skills:required_skill_id(id,code,label),ticket_assignments(id,assignee_id,risk_pct,reasoning,source,is_current,created_at)" },
+            { "name": "order", "value": "kanban_order.asc.nullslast,priority.desc,created_at.asc" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "wf1-notify-004",
+      "name": "Consultar Tickets Asignados",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/members",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "is_manager", "value": "eq.true" },
+            { "name": "select", "value": "id,team_id,name,email,role,current_load,is_manager" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "wf1-notify-005",
+      "name": "Consultar Managers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "function collect(name) {\n  const raw = $items(name).map(item => item.json);\n  if (raw.length === 1 && Array.isArray(raw[0])) return raw[0];\n  return raw;\n}\nconst payload = $('Normalizar Payload Backend').first().json;\nconst requirement = collect('Consultar Requirement')[0];\nconst tickets = collect('Consultar Tickets Asignados');\nconst managers = collect('Consultar Managers');\nif (!requirement) throw new Error('Requirement no encontrado en Supabase.');\nconst project = requirement.projects || {};\nconst manager = managers.find(m => m.id === project.owner_id) || managers.find(m => m.team_id === project.team_id) || managers[0] || null;\nconst managerEmail = payload.manager_email || manager?.email || '';\nconst managerId = manager?.id || payload.approved_by_id || null;\nconst assigned = tickets.filter(t => t.assignee_id && t.members);\nif (!assigned.length) throw new Error('No hay tickets asignados. Ejecuta /api/agents/assignment antes de aprobar o antes de llamar n8n.');\nreturn assigned.map((ticket, index) => {\n  const member = ticket.members || {};\n  const currentAssignment = (ticket.ticket_assignments || []).find(a => a.is_current && a.assignee_id === ticket.assignee_id) || (ticket.ticket_assignments || [])[0] || {};\n  const reasoning = ticket.assignment_reasoning || currentAssignment.reasoning || 'Asignado por el Assignment Agent del backend usando skills y carga actual.';\n  return { json: {\n    approval_id: payload.approval_id,\n    requirement_id: requirement.id,\n    requirement_title: requirement.title || 'Requirement aprobado',\n    requirement_summary: requirement.summary || '',\n    project_id: project.id,\n    project_name: project.name || 'Proyecto',\n    team_id: project.team_id,\n    approved_by: payload.approved_by,\n    manager_id: managerId,\n    manager_email: managerEmail,\n    ticket_id: ticket.id,\n    ticket_title: ticket.title,\n    ticket_description: ticket.description,\n    priority: ticket.priority || 'medium',\n    estimate_hours: ticket.estimate_hours || 0,\n    required_skill: ticket.skills?.label || ticket.skills?.code || 'general',\n    risk_pct: ticket.risk_pct || currentAssignment.risk_pct || 0,\n    status: ticket.status,\n    deadline: ticket.deadline,\n    kanban_order: ticket.kanban_order || index + 1,\n    assignment_reasoning: reasoning,\n    assignee_id: member.id,\n    assignee_name: member.name || 'Developer',\n    assignee_email: member.email || '',\n    assignee_role: member.role || '',\n    assignee_current_load: member.current_load || 0\n  }};\n});"
+      },
+      "id": "wf1-notify-006",
+      "name": "Construir Correos desde Supabase",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 300]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "loose" },
+          "options": { "caseSensitive": false, "typeValidation": "loose" },
           "conditions": [
             {
-              "id": "filter-email",
+              "id": "assignee-email",
               "leftValue": "={{ $json.assignee_email }}",
               "rightValue": "",
               "operator": { "type": "string", "operation": "notEmpty" }
@@ -42,26 +131,26 @@
         },
         "options": {}
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000003",
-      "name": "Filtrar Sin Email",
+      "id": "wf1-notify-007",
+      "name": "Filtrar Developers con Email",
       "type": "n8n-nodes-base.filter",
       "typeVersion": 2,
-      "position": [680, 300]
+      "position": [1520, 300]
     },
     {
       "parameters": {
         "fromEmail": "={{ $env.SMTP_FROM }}",
         "toEmail": "={{ $json.assignee_email }}",
-        "subject": "=✅ Plan aprobado — se te asignó: {{ $json.title }}",
+        "subject": "=Ticket asignado: {{ $json.ticket_title }}",
         "emailFormat": "html",
-        "message": "=<div style=\"font-family:sans-serif;max-width:600px;margin:0 auto\">\n  <h2 style=\"color:#111\">Ticket asignado: {{ $json.title }}</h2>\n  <p>Hola <strong>{{ $json.assignee_name }}</strong>,</p>\n  <p>El plan <strong>{{ $json.requirement_title }}</strong> del proyecto <strong>{{ $json.project_name }}</strong> fue aprobado por <strong>{{ $json.approved_by }}</strong>.</p>\n  <table style=\"border-collapse:collapse;width:100%;margin-top:16px\">\n    <tr style=\"background:#f5f5f5\">\n      <td style=\"padding:8px 12px;font-weight:600\">Campo</td>\n      <td style=\"padding:8px 12px;font-weight:600\">Valor</td>\n    </tr>\n    <tr><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">Prioridad</td><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">{{ $json.priority }}</td></tr>\n    <tr><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">Horas estimadas</td><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">{{ $json.estimate_hours }}h</td></tr>\n    <tr><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">Skill requerido</td><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">{{ $json.skill_label || $json.required_skill }}</td></tr>\n    <tr><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">Fecha límite</td><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">{{ $json.deadline || 'Por definir' }}</td></tr>\n    <tr><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">% Riesgo</td><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5;color:{{ $json.risk_pct > 60 ? '#dc2626' : $json.risk_pct > 40 ? '#d97706' : '#16a34a' }}\">{{ $json.risk_pct }}%</td></tr>\n  </table>\n  {{ $json.reasoning ? '<p style=\"margin-top:16px;background:#fef9c3;padding:12px;border-radius:6px\"><strong>Razonamiento de asignación:</strong> ' + $json.reasoning + '</p>' : '' }}\n  <p style=\"margin-top:24px;color:#6b7280;font-size:13px\">Meeting → Tickets PM · Cursor Buildathon El Salvador 2026</p>\n</div>",
+        "message": "=<div style=\"font-family:Arial,sans-serif;max-width:640px;margin:0 auto;color:#111\"><h2>Ticket asignado: {{ $json.ticket_title }}</h2><p>Hola <strong>{{ $json.assignee_name }}</strong>, el Assignment Agent del backend te asigno este ticket despues de revisar skills y carga del equipo.</p><table style=\"border-collapse:collapse;width:100%;margin:16px 0\"><tr><td style=\"padding:8px 12px;background:#f5f5f5;font-weight:700\">Proyecto</td><td style=\"padding:8px 12px;border:1px solid #e5e5e5\">{{ $json.project_name }}</td></tr><tr><td style=\"padding:8px 12px;background:#f5f5f5;font-weight:700\">Prioridad</td><td style=\"padding:8px 12px;border:1px solid #e5e5e5\">{{ $json.priority }}</td></tr><tr><td style=\"padding:8px 12px;background:#f5f5f5;font-weight:700\">Skill requerido</td><td style=\"padding:8px 12px;border:1px solid #e5e5e5\">{{ $json.required_skill }}</td></tr><tr><td style=\"padding:8px 12px;background:#f5f5f5;font-weight:700\">Horas estimadas</td><td style=\"padding:8px 12px;border:1px solid #e5e5e5\">{{ $json.estimate_hours }}h</td></tr><tr><td style=\"padding:8px 12px;background:#f5f5f5;font-weight:700\">Deadline</td><td style=\"padding:8px 12px;border:1px solid #e5e5e5\">{{ $json.deadline || 'Por definir' }}</td></tr><tr><td style=\"padding:8px 12px;background:#f5f5f5;font-weight:700\">Riesgo</td><td style=\"padding:8px 12px;border:1px solid #e5e5e5\">{{ $json.risk_pct }}%</td></tr></table><p style=\"background:#f9fafb;padding:12px;border-radius:8px\"><strong>Razonamiento del agente:</strong><br>{{ $json.assignment_reasoning }}</p><p style=\"font-size:13px;color:#6b7280\">Meeting to Tickets PM</p></div>",
         "options": {}
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000004",
-      "name": "Email a Asignado",
+      "id": "wf1-notify-008",
+      "name": "Email Developer Asignado",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
-      "position": [900, 300],
+      "position": [1740, 300],
       "credentials": { "smtp": { "id": "smtp-cred-id", "name": "SMTP" } }
     },
     {
@@ -79,111 +168,79 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"approval_id\": \"{{ $json.approval_id }}\",\n  \"ticket_id\": \"{{ $json.ticket_id }}\",\n  \"member_id\": \"{{ $json.assignee_id }}\",\n  \"channel\": \"email\",\n  \"template\": \"ticket_assigned\",\n  \"status\": \"sent\",\n  \"sent_at\": \"{{ $now.toISO() }}\",\n  \"metadata\": { \"to\": \"{{ $json.assignee_email }}\", \"risk_pct\": {{ $json.risk_pct }} }\n}",
+        "jsonBody": "={{ JSON.stringify({ approval_id: $json.approval_id, ticket_id: $json.ticket_id, member_id: $json.assignee_id, channel: 'email', template: 'ticket_assigned_after_backend_agent', status: 'sent', sent_at: $now.toISO(), metadata: { to: $json.assignee_email, project_name: $json.project_name, risk_pct: $json.risk_pct, source: 'backend_assignment_agent' } }) }}",
         "options": {}
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000005",
-      "name": "Log Notificacion Asignado",
+      "id": "wf1-notify-009",
+      "name": "Log Email Developer",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1120, 300]
+      "position": [1960, 300]
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "destinationFieldName": "assignments",
+        "options": {}
+      },
+      "id": "wf1-notify-010",
+      "name": "Agrupar Asignaciones Notificadas",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [2180, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const assignments = $input.first().json.assignments || [];\nif (!assignments.length) return [];\nconst first = assignments[0];\nconst rows = assignments.map(a => {\n  const riskColor = a.risk_pct > 60 ? '#dc2626' : a.risk_pct > 40 ? '#d97706' : '#16a34a';\n  return `<tr><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">${a.ticket_title}</td><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">${a.assignee_name}</td><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">${a.priority}</td><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5;color:${riskColor};font-weight:700\">${a.risk_pct}%</td><td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">${a.assignment_reasoning}</td></tr>`;\n}).join('');\nconst totalHours = assignments.reduce((sum, a) => sum + (a.estimate_hours || 0), 0);\nconst highRisk = assignments.filter(a => a.risk_pct > 60).length;\nconst html = `<div style=\"font-family:Arial,sans-serif;max-width:760px;margin:0 auto;color:#111\"><h2>Asignaciones notificadas: ${first.requirement_title}</h2><p><strong>Proyecto:</strong> ${first.project_name}</p><p>El backend ejecuto el Assignment Agent, guardo las asignaciones en Supabase y n8n notifico a los developers.</p><div style=\"display:flex;gap:16px;margin:16px 0\"><div style=\"background:#f5f5f5;padding:12px 18px;border-radius:8px\"><strong>${assignments.length}</strong><br><span style=\"color:#6b7280;font-size:13px\">tickets</span></div><div style=\"background:#f5f5f5;padding:12px 18px;border-radius:8px\"><strong>${totalHours}h</strong><br><span style=\"color:#6b7280;font-size:13px\">estimadas</span></div><div style=\"background:${highRisk ? '#fef2f2' : '#f0fdf4'};padding:12px 18px;border-radius:8px\"><strong>${highRisk}</strong><br><span style=\"color:#6b7280;font-size:13px\">riesgo alto</span></div></div><table style=\"border-collapse:collapse;width:100%\"><tr style=\"background:#111;color:#fff\"><th style=\"padding:8px 12px;text-align:left\">Ticket</th><th style=\"padding:8px 12px;text-align:left\">Developer</th><th style=\"padding:8px 12px;text-align:left\">Prioridad</th><th style=\"padding:8px 12px;text-align:left\">Riesgo</th><th style=\"padding:8px 12px;text-align:left\">Por que</th></tr>${rows}</table><p style=\"font-size:13px;color:#6b7280;margin-top:24px\">Fuente de decision: backend Assignment Agent + Supabase.</p></div>`;\nreturn [{ json: { approval_id: first.approval_id, manager_id: first.manager_id, manager_email: first.manager_email, requirement_id: first.requirement_id, requirement_title: first.requirement_title, total_assignments: assignments.length, summary_html: html } }];"
+      },
+      "id": "wf1-notify-011",
+      "name": "Construir Resumen Jefe IT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2400, 300]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "typeValidation": "loose" },
+          "options": { "caseSensitive": false, "typeValidation": "loose" },
           "conditions": [
             {
-              "id": "risk-check",
-              "leftValue": "={{ $json.risk_pct }}",
-              "rightValue": 60,
-              "operator": { "type": "number", "operation": "gt" }
+              "id": "manager-email",
+              "leftValue": "={{ $json.manager_email }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
             }
           ],
           "combinator": "and"
         },
         "options": {}
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000006",
-      "name": "Riesgo Alto?",
-      "type": "n8n-nodes-base.if",
+      "id": "wf1-notify-012",
+      "name": "Filtrar Jefe con Email",
+      "type": "n8n-nodes-base.filter",
       "typeVersion": 2,
-      "position": [1340, 300]
+      "position": [2620, 300]
     },
     {
       "parameters": {
         "fromEmail": "={{ $env.SMTP_FROM }}",
         "toEmail": "={{ $json.manager_email }}",
-        "subject": "=⚠️ Riesgo alto en ticket: {{ $json.title }} ({{ $json.risk_pct }}%)",
-        "emailFormat": "html",
-        "message": "=<div style=\"font-family:sans-serif;max-width:600px;margin:0 auto\">\n  <div style=\"background:#fef2f2;border-left:4px solid #dc2626;padding:16px;border-radius:0 8px 8px 0;margin-bottom:16px\">\n    <h2 style=\"color:#dc2626;margin:0 0 8px\">⚠️ Alerta de Riesgo Alto</h2>\n    <p style=\"margin:0;color:#111\">Ticket <strong>{{ $json.title }}</strong> asignado a <strong>{{ $json.assignee_name }}</strong> con {{ $json.risk_pct }}% de riesgo.</p>\n  </div>\n  <p><strong>Proyecto:</strong> {{ $json.project_name }}</p>\n  <p><strong>Plan aprobado:</strong> {{ $json.requirement_title }}</p>\n  <p><strong>Horas estimadas:</strong> {{ $json.estimate_hours }}h · <strong>Prioridad:</strong> {{ $json.priority }}</p>\n  <p style=\"background:#fef9c3;padding:12px;border-radius:6px\"><strong>Razonamiento del Assignment Agent:</strong><br>{{ $json.reasoning }}</p>\n  <p style=\"color:#6b7280;font-size:13px;margin-top:24px\">Revisá la carga de {{ $json.assignee_name }} en el dashboard del equipo.</p>\n</div>",
-        "options": {}
-      },
-      "id": "a1b2c3d4-0001-0001-0001-000000000007",
-      "name": "Email Alerta Riesgo Manager",
-      "type": "n8n-nodes-base.emailSend",
-      "typeVersion": 2.1,
-      "position": [1560, 200],
-      "credentials": { "smtp": { "id": "smtp-cred-id", "name": "SMTP" } }
-    },
-    {
-      "parameters": {},
-      "id": "a1b2c3d4-0001-0001-0001-000000000008",
-      "name": "Sin Riesgo Alto",
-      "type": "n8n-nodes-base.noOp",
-      "typeVersion": 1,
-      "position": [1560, 420]
-    },
-    {
-      "parameters": { "mode": "append", "options": {} },
-      "id": "a1b2c3d4-0001-0001-0001-000000000009",
-      "name": "Unir Ramas",
-      "type": "n8n-nodes-base.merge",
-      "typeVersion": 3,
-      "position": [1780, 300]
-    },
-    {
-      "parameters": {
-        "aggregate": "aggregateAllItemData",
-        "destinationFieldName": "tickets",
-        "options": {}
-      },
-      "id": "a1b2c3d4-0001-0001-0001-000000000010",
-      "name": "Agregar Todos los Tickets",
-      "type": "n8n-nodes-base.aggregate",
-      "typeVersion": 1,
-      "position": [2000, 300]
-    },
-    {
-      "parameters": {
-        "jsCode": "// Construye el HTML de la tabla resumen para el email al manager.\nconst tickets = $input.first().json.tickets;\nconst first = tickets[0] || {};\nconst requirementTitle = first.requirement_title || 'Plan aprobado';\nconst projectName = first.project_name || '';\nconst approvedBy = first.approved_by || 'Manager';\nconst managerEmail = first.manager_email || '';\n\nconst rows = tickets.map(t => {\n  const riskColor = t.risk_pct > 60 ? '#dc2626' : t.risk_pct > 40 ? '#d97706' : '#16a34a';\n  return `<tr>\n    <td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">${t.title}</td>\n    <td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">${t.assignee_name || 'Sin asignar'}</td>\n    <td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">${t.priority}</td>\n    <td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">${t.estimate_hours}h</td>\n    <td style=\"padding:8px 12px;border-top:1px solid #e5e5e5;color:${riskColor};font-weight:600\">${t.risk_pct}%</td>\n    <td style=\"padding:8px 12px;border-top:1px solid #e5e5e5\">${t.deadline || '—'}</td>\n  </tr>`;\n}).join('');\n\nconst highRisk = tickets.filter(t => t.risk_pct > 60).length;\nconst totalHours = tickets.reduce((a, t) => a + (t.estimate_hours || 0), 0);\n\nreturn [{\n  json: {\n    manager_email: managerEmail,\n    requirement_title: requirementTitle,\n    project_name: projectName,\n    approved_by: approvedBy,\n    approval_id: first.approval_id,\n    total_tickets: tickets.length,\n    total_hours: totalHours,\n    high_risk_count: highRisk,\n    summary_html: `<div style=\"font-family:sans-serif;max-width:700px;margin:0 auto\">\n  <h2 style=\"color:#111\">Plan aprobado: ${requirementTitle}</h2>\n  <p>Proyecto: <strong>${projectName}</strong> · Aprobado por: <strong>${approvedBy}</strong></p>\n  <div style=\"display:flex;gap:24px;margin:16px 0\">\n    <div style=\"background:#f5f5f5;padding:12px 20px;border-radius:8px;text-align:center\">\n      <div style=\"font-size:28px;font-weight:700\">${tickets.length}</div>\n      <div style=\"color:#6b7280;font-size:13px\">tickets</div>\n    </div>\n    <div style=\"background:#f5f5f5;padding:12px 20px;border-radius:8px;text-align:center\">\n      <div style=\"font-size:28px;font-weight:700\">${totalHours}h</div>\n      <div style=\"color:#6b7280;font-size:13px\">horas estimadas</div>\n    </div>\n    ${highRisk > 0 ? `<div style=\"background:#fef2f2;padding:12px 20px;border-radius:8px;text-align:center\">\n      <div style=\"font-size:28px;font-weight:700;color:#dc2626\">${highRisk}</div>\n      <div style=\"color:#dc2626;font-size:13px\">riesgo alto</div>\n    </div>` : ''}\n  </div>\n  <table style=\"border-collapse:collapse;width:100%\">\n    <tr style=\"background:#111;color:#fff\">\n      <th style=\"padding:8px 12px;text-align:left\">Ticket</th>\n      <th style=\"padding:8px 12px;text-align:left\">Asignado a</th>\n      <th style=\"padding:8px 12px;text-align:left\">Prioridad</th>\n      <th style=\"padding:8px 12px;text-align:left\">Horas</th>\n      <th style=\"padding:8px 12px;text-align:left\">Riesgo</th>\n      <th style=\"padding:8px 12px;text-align:left\">Deadline</th>\n    </tr>\n    ${rows}\n  </table>\n  <p style=\"margin-top:24px;color:#6b7280;font-size:13px\">Meeting → Tickets PM · Cursor Buildathon El Salvador 2026</p>\n</div>`\n  }\n}];"
-      },
-      "id": "a1b2c3d4-0001-0001-0001-000000000011",
-      "name": "Construir Resumen HTML",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [2220, 300]
-    },
-    {
-      "parameters": {
-        "fromEmail": "={{ $env.SMTP_FROM }}",
-        "toEmail": "={{ $json.manager_email }}",
-        "subject": "=📋 Plan aprobado: {{ $json.requirement_title }} ({{ $json.total_tickets }} tickets · {{ $json.total_hours }}h)",
+        "subject": "=Asignaciones notificadas: {{ $json.requirement_title }}",
         "emailFormat": "html",
         "message": "={{ $json.summary_html }}",
         "options": {}
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000012",
-      "name": "Email Resumen al Jefe",
+      "id": "wf1-notify-013",
+      "name": "Email Resumen Jefe IT",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
-      "position": [2440, 300],
+      "position": [2840, 300],
       "credentials": { "smtp": { "id": "smtp-cred-id", "name": "SMTP" } }
     },
     {
       "parameters": {
-        "method": "PATCH",
-        "url": "={{ $env.SUPABASE_URL }}/rest/v1/approvals?id=eq.{{ $json.approval_id }}",
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/notifications",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -195,91 +252,42 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "{ \"n8n_notified\": true, \"n8n_ok\": true }",
+        "jsonBody": "={{ JSON.stringify({ approval_id: $json.approval_id, member_id: $json.manager_id, channel: 'email', template: 'manager_assignment_summary_after_backend_agent', status: 'sent', sent_at: $now.toISO(), metadata: { to: $json.manager_email, requirement_id: $json.requirement_id, total_assignments: $json.total_assignments, source: 'backend_assignment_agent' } }) }}",
         "options": {}
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000013",
-      "name": "Confirmar Aprobacion en Supabase",
+      "id": "wf1-notify-014",
+      "name": "Log Email Jefe IT",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2660, 300]
+      "position": [3060, 300]
     }
   ],
   "connections": {
-    "Plan Aprobado Webhook": {
-      "main": [
-        [{ "node": "Expandir Tickets", "type": "main", "index": 0 }]
-      ]
-    },
-    "Expandir Tickets": {
-      "main": [
-        [{ "node": "Filtrar Sin Email", "type": "main", "index": 0 }]
-      ]
-    },
-    "Filtrar Sin Email": {
-      "main": [
-        [{ "node": "Email a Asignado", "type": "main", "index": 0 }]
-      ]
-    },
-    "Email a Asignado": {
-      "main": [
-        [{ "node": "Log Notificacion Asignado", "type": "main", "index": 0 }]
-      ]
-    },
-    "Log Notificacion Asignado": {
-      "main": [
-        [{ "node": "Riesgo Alto?", "type": "main", "index": 0 }]
-      ]
-    },
-    "Riesgo Alto?": {
-      "main": [
-        [{ "node": "Email Alerta Riesgo Manager", "type": "main", "index": 0 }],
-        [{ "node": "Sin Riesgo Alto", "type": "main", "index": 0 }]
-      ]
-    },
-    "Email Alerta Riesgo Manager": {
-      "main": [
-        [{ "node": "Unir Ramas", "type": "main", "index": 0 }]
-      ]
-    },
-    "Sin Riesgo Alto": {
-      "main": [
-        [{ "node": "Unir Ramas", "type": "main", "index": 1 }]
-      ]
-    },
-    "Unir Ramas": {
-      "main": [
-        [{ "node": "Agregar Todos los Tickets", "type": "main", "index": 0 }]
-      ]
-    },
-    "Agregar Todos los Tickets": {
-      "main": [
-        [{ "node": "Construir Resumen HTML", "type": "main", "index": 0 }]
-      ]
-    },
-    "Construir Resumen HTML": {
-      "main": [
-        [{ "node": "Email Resumen al Jefe", "type": "main", "index": 0 }]
-      ]
-    },
-    "Email Resumen al Jefe": {
-      "main": [
-        [{ "node": "Confirmar Aprobacion en Supabase", "type": "main", "index": 0 }]
-      ]
-    }
+    "Webhook Backend Approval": { "main": [[{ "node": "Normalizar Payload Backend", "type": "main", "index": 0 }]] },
+    "Normalizar Payload Backend": { "main": [[{ "node": "Consultar Requirement", "type": "main", "index": 0 }]] },
+    "Consultar Requirement": { "main": [[{ "node": "Consultar Tickets Asignados", "type": "main", "index": 0 }]] },
+    "Consultar Tickets Asignados": { "main": [[{ "node": "Consultar Managers", "type": "main", "index": 0 }]] },
+    "Consultar Managers": { "main": [[{ "node": "Construir Correos desde Supabase", "type": "main", "index": 0 }]] },
+    "Construir Correos desde Supabase": { "main": [[{ "node": "Filtrar Developers con Email", "type": "main", "index": 0 }]] },
+    "Filtrar Developers con Email": { "main": [[{ "node": "Email Developer Asignado", "type": "main", "index": 0 }]] },
+    "Email Developer Asignado": { "main": [[{ "node": "Log Email Developer", "type": "main", "index": 0 }]] },
+    "Log Email Developer": { "main": [[{ "node": "Agrupar Asignaciones Notificadas", "type": "main", "index": 0 }]] },
+    "Agrupar Asignaciones Notificadas": { "main": [[{ "node": "Construir Resumen Jefe IT", "type": "main", "index": 0 }]] },
+    "Construir Resumen Jefe IT": { "main": [[{ "node": "Filtrar Jefe con Email", "type": "main", "index": 0 }]] },
+    "Filtrar Jefe con Email": { "main": [[{ "node": "Email Resumen Jefe IT", "type": "main", "index": 0 }]] },
+    "Email Resumen Jefe IT": { "main": [[{ "node": "Log Email Jefe IT", "type": "main", "index": 0 }]] }
   },
   "active": false,
   "settings": {
     "executionOrder": "v1",
     "saveManualExecutions": true,
-    "callerPolicy": "workflowsFromSameOwner",
-    "errorWorkflow": ""
+    "callerPolicy": "workflowsFromSameOwner"
   },
   "pinData": {},
   "meta": {
     "templateCredsSetupCompleted": false,
     "instanceId": "kb-buildathon-2026"
   },
-  "id": "wf-aprobacion-2026",
+  "id": "wf-notificar-asignaciones-aprobadas-2026",
   "tags": [{ "id": "tag-pm", "name": "meeting-to-tickets" }]
 }
